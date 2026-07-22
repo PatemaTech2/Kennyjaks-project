@@ -1,8 +1,9 @@
 # KENNYJAKS BOT — SYSTEM ARCHITECTURE
 
-**Version:** 1.0  
+**Version:** 2.0  
+**Owner:** Benimaru  
 **Runtime:** Node.js + WhatsApp (`@whiskeysockets/baileys` v7)  
-**Main File:** `index.js` (~8100 lines, monolithic architecture)  
+**Main File:** `index.js` (~10,000 lines, monolithic architecture with V2 upgrade layer)  
 **Database:** File-based JSON (`database/jjkbot.json`)  
 
 ---
@@ -21,10 +22,12 @@
 10. [Clan & Village System](#clan--village-system)
 11. [Summon System](#summon-system)
 12. [Equipment System](#equipment-system)
-13. [Anti-Ban System](#anti-ban-system)
-14. [Mod Commands](#mod-commands)
-15. [AI Systems](#ai-systems)
-16. [Broadcast System](#broadcast-system)
+13. [Dark Continent System](#dark-continent-system)
+14. [Anti-Ban System](#anti-ban-system)
+15. [Mod Commands](#mod-commands)
+16. [V2 Upgrade Layer](#v2-upgrade-layer)
+17. [AI Systems](#ai-systems)
+18. [Broadcast System](#broadcast-system)
 
 ---
 
@@ -40,8 +43,8 @@ The bot is a **single monolithic file** (`index.js`) using:
 
 | Component | Lines | Description |
 |-----------|-------|-------------|
-| `startBot()` | 4406–8073 | Main socket setup, anti-ban wrapper, event listeners, command router |
-| `launch()` | 8081–8099 | CLI launcher for multi-device support |
+| `startBot()` | Main socket setup, anti-ban wrapper, event listeners, command router |
+| `launch()` | CLI launcher for multi-device support |
 | Data constants | 1–858 | `INNATE_TECHNIQUES`, `CROSS_UNIVERSE_SKILLS`, `TOKYO_MAP`, `ITEMS`, `ARMOR_SHOP`, `WEAPON_SHOP`, `SUMMON_SHOP`, `DUNGEON_TEMPLATES` |
 | State objects | 41–118 | `db`, `mods`, `config`, backup system |
 
@@ -123,7 +126,7 @@ db = {
     Output: 1, Refinement: 10
   },
   skill_points: 0,
-  trained_stats: { attack: 0, defense: 0, max_hp: 0, max_ce: 0 },
+  trained_stats: { attack: 0, defense: 0, max_hp: 0, max_ce: 0, speed: 0 },
   equipment: { weapon: "None", armor: "None", accessory: "None", relic: "None" },
   summon: { active, name, HP, Max_HP, CE, Max_CE, atk, move, effect, pl },
   innate_technique_id: "Limitless",
@@ -145,7 +148,23 @@ db = {
   weapon: {},              // Currently equipped weapon
   heavenly_restriction: false,
   fingers: [],             // Sukuna fingers held
-  // ... 50+ fields total
+  // V2 fields (auto-migrated)
+  technique_mastery: {},   // Per-technique XP, level, stats
+  weapon_mastery: {},      // Per-weapon XP, level
+  prestige: 0,             // Prestige level
+  prestige_points: 0,      // Prestige currency
+  statistics: {},          // PvP, PvE, combat stats
+  daily_missions: {},      // Daily mission progress
+  collections: {},         // Curse/weapon/armor/summon collections
+  cooldowns: {},           // Combat cooldowns
+  clan_contributions: {},  // Donation/mission tracking
+  crafting: {},            // Recipes and materials
+  stance_mastery: 0,       // Stance proficiency
+  domain_mastery: 0,       // Domain expansion proficiency
+  domain_kills: 0,         // Enemies killed with domains
+  boss_encounters: {},     // Per-boss attempt/kill/best-time
+  skill_tree_path: [],     // Unlocked skill tree nodes
+  skill_tree_points: 0     // Available skill tree points
 }
 ```
 
@@ -154,7 +173,7 @@ db = {
 ## 3. USER SYSTEM
 
 ### Registration Flow
-1. `.start` → Initialize player
+1. `.start` → Initialize player with `initPlayer()`
 2. `.reg-curse` / `.reg-fighter` → Choose alignment
 3. `.register <name>` → Set display name
 
@@ -168,7 +187,7 @@ Creates a new user with:
 
 ### Stats & Power Model
 - **Grade bands**: Grade 4 (lvl 1-9), Grade 3 (10-29), Grade 2 (30-69), Grade 1 (70-699), Special Grade (700+)
-- `calcPower(user)`: Base stats + trained stats + title perks + loot modifiers
+- `calcPower(user)`: Base stats + trained stats + title perks + loot modifiers + HR bonuses
 - `getCombatStats(user)`: Adds weapon/armor/accessory/relic stats, armor effects, loot multipliers
 
 ### Level & Grade Progression
@@ -177,9 +196,13 @@ Creates a new user with:
 - Max level: 1000
 - Level up grants +1 skill point, recalculates stats
 
-### Effective Grade Scaling
-- `getEffectiveGrade(user)`: `clamp(grade - floor(level/10), 0, 4)`
-- Enemies scale to player's effective grade
+### V2 Additions
+- **Technique Mastery**: Per-technique XP and levels (1-10), +5% damage per level, max +50%
+- **Weapon Mastery**: Per-weapon XP and levels (1-10), +3% damage per level, max +30%
+- **Prestige**: Reset progress at level 100+ for prestige points
+- **Statistics**: Track PvP wins/losses, dungeon clears, curse defeats, domains expanded, critical hits, perfect guards
+- **Daily Missions**: 3 rotating daily missions with rewards
+- **Collections**: Track curses, weapons, armor, summons collected
 
 ---
 
@@ -189,32 +212,46 @@ Creates a new user with:
 - `.spawn-curse`: Spawns a random curse from `CURSES` array
 - `.b-curse`: Creates `db.combats[sender]` with scaled enemy stats
 - `.dungeon <id>`: Creates dungeon combat with floor progression
+- `.engage-r`: Dark Continent curse encounter
 
-### Combat Flow (`handleNpcFight`, line 1382)
+### Combat Flow (`handleNpcFight`)
 1. **Status tick**: `tickCombatStatus()` applies DoT damage
-2. **Player action**: `.attack`, `.technique-1..4`, `.ut-1..4`, `.domain`, `.su`, `.rct`, `.guard`, `.flee`, loot-specific moves
+2. **Player action**: `.attack`, `.technique-1..5`, `.ut-1..4`, `.domain`, `.su`, `.rct`, `.guard`, `.flee`, loot-specific moves, `.csm`, `.csm1-9`
 3. **Damage calculation**:
-   - Base attack: `stats.attack + random(0,11)`
-   - Technique damage: `floor((baseHit * 2.0 + casterPower * 1.1) + levelBonus)`
-   - CE cost reduced by armor/skills
-   - Crit chance: base 5% + speed-based + bonuses
-4. **Enemy phase** (`runEnemyPhase`, line 3209):
-   - `resolveEnemyAction()` picks from `ENEMY_MOVE_POOL` (strike, maul, venom, wither, blind, guard, charge)
-   - Defense mitigation: `100 / (100 + min(defense, 300))`
-   - Guarding reduces damage by 60%
-   - Enemy can expand Domain (sure-hit, ignores guard)
-5. **Status effects**: BLEED (DoT), WEAKEN, BLIND, Domain Pressure
+    - Base attack: `stats.attack + random(0,11)`
+    - Technique damage: `floor((baseHit * 2.0 + casterPower * 1.1) + levelBonus)`
+    - CE cost reduced by armor/skills
+    - Crit chance: base 5% + speed-based + bonuses
+    - **V2 Combo Chain**: consecutive attacks within 4s build multiplier (max 3x)
+    - **V2 Cooldowns**: high-cost techniques have cooldowns
+4. **Enemy phase** (`runEnemyPhase`):
+    - `resolveEnemyAction()` picks from `ENEMY_MOVE_POOL` (strike, maul, venom, wither, blind, guard, charge)
+    - Defense mitigation: `100 / (100 + min(defense, 300))`
+    - Guarding reduces damage by 60%
+    - Enemy can expand Domain (sure-hit, ignores guard)
+5. **Status effects**: BLEED (DoT), WEAKEN, BLIND, Domain Pressure, STUN
 6. **Victory**: +4000 XP, +5000 gold, +1 skill point, -5 corruption, possible loot drop (30% chance)
 7. **Defeat**: XP loss (50% of needed), RECOVERY status (600 turns / 10 min), corruption +8
 
-### Status Effects
-| Effect | Type | Behavior |
-|--------|------|----------|
-| BLEED | DoT | % of Max_HP per turn |
-| WEAKEN | Debuff | Reduces damage output |
-| BLIND | Debuff | Reduces accuracy |
-| RECOVERY | Penalty | Cannot explore for 10 min |
-| Domain Pressure | Debuff | 20% damage reduction for 2 turns |
+### V2 Combat Features
+- **Combo Chain**: Track consecutive attacks, multiplier up to 3x
+- **Technique Mastery XP**: Grant XP on successful hits, level up for damage bonus
+- **Weapon Mastery XP**: Grant XP on weapon strikes, level up for damage bonus
+- **Text Combat UI**: Box-formatted combat log with HP/CE bars, threat levels, status effects
+
+### Dark Continent Combat
+- `.explore <region>`: Enter region, generates sub-regions (anime character names)
+- `.subs`: List sub-regions
+- `.sub <name>`: Enter sub-region
+- `.engage-r`: Battle curse in current region/sub-region
+- `.leave-region`: Exit region
+- `.move`: Adjust combat distance
+- `.sanity` / `.stance`: Check sanity/stance stability
+
+### Boss Phases (V2)
+Dungeon bosses now have multiple phases triggered by HP thresholds:
+- **Phase effects**: enrage (+damage), blind (player accuracy down), summon (minions), domain (sure-hit), cleave (defense bypass), multi-hit (rapid slashes)
+- `checkBossPhaseTransition()`: Monitors HP % and applies phase effects
 
 ---
 
@@ -235,20 +272,21 @@ Creates a new user with:
 }
 ```
 
-### Turn Resolution (`handlePvpTurn`, line 2954)
+### Turn Resolution (`handlePvpTurn`)
 1. **Commit phase**: Each fighter submits a move (stored in `match.committed`)
 2. **Validation**: `pvpComputeOffense()` checks CE costs, validates moves
-3. **Resolution** (`resolvePvpRound`, line 3006):
-   - Phase 1: Defensive/self actions (guard, RCT, jackpot, taunt)
-   - Phase 2: Offensive actions resolve in **SPEED order** (higher speed lands first)
-   - Both fighters strike before round outcome is decided
-   - On double-KO, faster fighter wins
+3. **Resolution** (`resolvePvpRound`):
+    - Phase 1: Defensive/self actions (guard, RCT, jackpot, taunt)
+    - Phase 2: Offensive actions resolve in **SPEED order** (higher speed lands first)
+    - Both fighters strike before round outcome is decided
+    - On double-KO, faster fighter wins
+    - V2 mastery/stat tracking on hit
 
 ### Damage Formula
 - `.attack`: `round(me.atk * variance - you.def * 0.25)`, guard reduces by 55%
 - `.technique-n`: `round((move.damage + me.atk * 0.4 - you.def * 0.25) + levelBonus)`
 - `.wa`: `round(wa_attack * variance)`
-- `.domain`: `round(me.atk * 2 + 200 - you.def * 0.25)`
+- `.domain`: `round(me.atk * 2 + 200 - you.def * 0.25)` + V2 domain mastery bonus
 
 ### Rewards
 - Winner: +1500 XP, +500 gold
@@ -331,9 +369,9 @@ All other commands are blocked.
 2. Player actions: `.attack`, `.technique-1..4`, `.domain`, `.su`, `.guard`
 3. **Summon auto-strikes** every turn (unless player used `.su`)
 4. Sukuna retaliates via `sukunaRetaliate()`:
-   - 18% chance of Malevolent Shrine domain expansion (3400 damage to all)
-   - Basic strike: 1500 ATK × 0.8–1.4
-   - 35% domain chance for 15-finger variant (5000 damage)
+    - 18% chance of Malevolent Shrine domain expansion (3400 damage to all)
+    - Basic strike: 1500 ATK × 0.8–1.4
+    - 35% domain chance for 15-finger variant (5000 damage)
 5. Dead players removed from raid, broadcast alerts sent
 
 ### Rewards
@@ -353,6 +391,7 @@ All other commands are blocked.
 ### Awakening Conditions
 - Defeat a **Special Grade** curse using **only** `.wa` (weapon strikes)
 - Granted via `.give-hr` mod command
+- Removed via `.rem-hr` mod command (grants random technique)
 
 ### Effects (`grantHeavenlyRestriction`)
 - `heavenly_restriction: true`
@@ -388,6 +427,7 @@ All other commands are blocked.
 ### HR Domain Immunity
 - HR users cannot use `.domain`
 - Enemy domain expansions deal 0 damage to HR users
+- V2: HR users have guaranteed min 90 attack and 70 defense
 
 ---
 
@@ -396,6 +436,7 @@ All other commands are blocked.
 ### Currency
 - **K-Coins**: Primary currency stored in `user.wallet`
 - **Bank**: `user.bank` (withdraw/deposit)
+- **Skill Points**: `user.skill_points` (earned from dungeons, level-ups)
 
 ### Income Sources
 | Source | Amount | Command |
@@ -408,6 +449,7 @@ All other commands are blocked.
 | Culling Game win | +10M | Automatic |
 | Village taxes | Variable | `.set-taxes` (clan head) |
 | Fishing | Consumable | `.fish` (5 min cooldown) |
+| Mission rewards | Varies | `.claim-missions` |
 
 ### Gambling (`.gamble`)
 - Colors: red, green, blue, black
@@ -422,6 +464,13 @@ All other commands are blocked.
 - **Armor Shop** (`.shopc`): 11 armor pieces, 1.2K–50M coins
 - **Summon Shop** (`.summonshop`): 20 one-of-a-kind summons
 - **Player Shops** (`.shop-create`): 1500 coins to create, stock items, other players buy
+
+### V2 Economy Additions
+- **Weapon Evolution**: `.weapon-evolve <name>` — 5000 K-Coins for +50% stats
+- **Clan Donations**: `.clan-donate <amt>` — contributes to clan bank and XP
+- **Clan Buffs**: `.clan-buff <name>` — 50K K-Coins per buff
+- **Crafting Materials**: Curse cores drop from enemies, used in crafting system
+- **Upgrade Costs**: `.upgrade <name>` — 200 gold for +20% stats
 
 ---
 
@@ -438,6 +487,14 @@ All other commands are blocked.
 - **Max members**: 50
 - **Head title**: "HOKAGE"
 - `.clan-create <name>` → `.clan-join <name>` → `.leave-clan`
+
+### V2 Clan Features
+- **Clan Levels**: XP from donations and missions, unlocks buffs
+- **Clan Bank**: `.clan-donate` feeds the bank for upgrades
+- **Clan Buffs**: `.clan-buff <name>` activates temporary buffs (50K K-Coins)
+- **Clan Bosses**: `.clan-boss` summons a scaling boss for all members
+- **Clan Wars**: Tracked in `db.clan_wars`
+- **Clan Missions**: Automatic generation and tracking
 
 ### Colonization
 - Only clan HOKAGE can `.colonise <name>`
@@ -486,6 +543,7 @@ All other commands are blocked.
 - Base weapon strike (`.wa`): 6 damage
 - HR users: `.wa = 200`, `.attack = 150`
 - Special weapons: Prison Realm (seals for 24h), Playful Cloud, Black Rope (break Prison Realm seals)
+- V2: `.weapon-evolve <name>` for +50% stats
 
 ### Armor (`ARMOR_SHOP`)
 - 11 pieces (1.2K–50M coins)
@@ -506,11 +564,38 @@ All other commands are blocked.
 - `.equip <name>`: Equip from inventory to slot
 - `.unequip <slot>`: Return to inventory
 - `.upgrade <name>`: +20% stats for 200 gold
+- `.weapon-evolve <name>`: +50% stats for 5000 gold (V2)
 - Slots: `weapon`, `armor`, `accessory`, `relic`
 
 ---
 
-## 13. ANTI-BAN SYSTEM
+## 13. DARK CONTINENT SYSTEM
+
+### Regions
+- 100 procedurally generated regions with themes
+- Each region has: level requirement, danger rating, curses, treasure, logbook, sub-regions
+- Sub-regions are named after anime characters (Goku, Luffy, Gojo, etc.)
+
+### Exploration
+- `.explore <region>`: Enter region, generates sub-regions on first entry
+- `.subs`: List sub-regions in current region
+- `.sub <name>`: Enter specific sub-region
+- `.leave-region`: Exit current region
+- `.engage-r`: Battle curse in current region or sub-region
+- `.move <close|far|melee|range|number>`: Adjust combat distance
+- `.sanity`: Check sanity level (decreases in Dark Continent)
+- `.stance`: Check stance stability
+
+### V2 Dark Continent Features
+- Sub-region names from anime character pool
+- Curse spawn variance: 23% strong curses, 22% mid, 55% weak
+- CSM absorption: `.csm list` shows absorbed curses, `.csm1-9` unleashes specific curse
+- Environmental hazards per sub-region
+- Pandora shards and key mechanics
+
+---
+
+## 14. ANTI-BAN SYSTEM
 
 ### Implementation
 The anti-ban protocol **monkey-patches** `sock.sendMessage`:
@@ -545,7 +630,7 @@ sock.sendMessage = (jid, content, options) => {
 
 ---
 
-## 14. MOD COMMANDS
+## 15. MOD COMMANDS
 
 ### Permission System
 - `isOwner(sender)`: Checks `config.owner`
@@ -570,8 +655,10 @@ sock.sendMessage = (jid, content, options) => {
 | `.give-l <level>` | Set user's level |
 | `.give-loot <name>` | Grant unique loot (mod copy, doesn't remove from pool) |
 | `.give-hr` | Grant Heavenly Restriction |
+| `.rem-hr` | Remove Heavenly Restriction, grant random technique |
 | `.give-skill <name>` | Grant cross-universe skill |
 | `.give-qk <name>` | Grant quirk to HR user |
+| `.give-sp <amt>` | Grant skill points to user |
 | `.spawn-sukuna` | Force-spawn Sukuna raid |
 | `.end-sukuna` | Banish Sukuna, scatter fingers |
 | `.cg-end` | Terminate Culling Game |
@@ -587,7 +674,80 @@ sock.sendMessage = (jid, content, options) => {
 
 ---
 
-## 15. AI SYSTEMS
+## 16. V2 UPGRADE LAYER
+
+### Database Migration
+- `migrateV2()`: Auto-runs on boot, adds all V2 fields with safe defaults
+- `migrateClans()`: Adds clan level, bank, buffs, missions, wars, boss
+- Never overwrites existing data; only creates missing fields
+
+### New V2 Systems
+1. **Technique Mastery** (`technique_mastery`, `technique_stats`)
+   - Per-technique XP, levels 1-10
+   - +5% damage per level, max +50%
+   - Evolution at level 5 for key techniques
+   - Statistics tracking: total damage, uses, critical hits
+
+2. **Weapon Mastery** (`weapon_mastery`)
+   - Per-weapon XP, levels 1-10
+   - +3% damage per level, max +30%
+
+3. **Prestige** (`prestige`, `prestige_points`)
+   - Available at level 100+
+   - Resets progress, grants prestige points
+
+4. **Daily Missions** (`daily_missions`)
+   - 3 rotating daily missions
+   - Rewards: K-Coins
+   - `.missions` to view, `.claim-missions` to collect
+
+5. **Collections** (`collections`)
+   - Track curses, weapons, armor, summons collected
+   - `.collections` to view
+
+6. **Combat V2**
+   - Combo chains: consecutive attacks build multiplier (max 3x)
+   - Cooldowns: high-cost techniques have cooldowns
+   - Text-based combat UI with box formatting
+
+7. **Clan V2**
+   - Clan levels, XP, bank, buffs, missions, wars, boss
+   - `.clan-donate`, `.clan-buff`, `.clan-boss`
+
+8. **Domain V2**
+   - Domain mastery: +3% damage per level, max +30%
+   - Domain kill tracking
+   - Applied in both PvE and PvP
+
+9. **Boss V2**
+   - Multi-phase bosses in all 5 dungeons
+   - Phase effects: enrage, blind, summon, domain, cleave, multi-hit
+   - `checkBossPhaseTransition()` tracks HP thresholds
+
+10. **Economy V2**
+    - Weapon evolution: `.weapon-evolve <name>`
+    - Clan donations and buffs as money sinks
+
+### V2 Helper Functions
+- `ensureTechniqueMastery(user)`: Safe access to technique mastery data
+- `getTechniqueMastery(user, techId)`: Get or create mastery entry
+- `addTechniqueMasteryXp(user, techId, amount)`: Add XP, handle level ups
+- `getTechniqueMasteryDamageBonus(user, techId)`: Returns bonus multiplier
+- `checkTechniqueEvolution(user, techId)`: Check for evolution unlocks
+- `recordTechniqueDamage(user, techId, damage)`: Track technique stats
+- `incrementComboChain(combat, now)`: Track and update combo multiplier
+- `setCooldown(user, key, durationMs)`: Set ability cooldown
+- `getWeaponMastery(user, weaponId)`: Get or create weapon mastery
+- `addWeaponMasteryXp(user, weaponId, amount)`: Add weapon XP
+- `recordClanContribution(user, amount)`: Track clan donations
+- `recordBossEncounter(user, bossId, won, timeMs)`: Track boss attempts
+- `recordPvpResult(user, won)`: Track PvP statistics
+- `canPrestige(user)`: Check prestige eligibility
+- `applyPrestige(user)`: Execute prestige reset
+
+---
+
+## 17. AI SYSTEMS
 
 ### AI Rule Generator
 - **No actual LLM integration** — uses template-based procedural generation
@@ -607,7 +767,7 @@ sock.sendMessage = (jid, content, options) => {
 
 ---
 
-## 16. BROADCAST SYSTEM
+## 18. BROADCAST SYSTEM
 
 ### Core Function (`broadcastAllGroups`)
 ```javascript
@@ -661,6 +821,10 @@ async function broadcastAllGroups(sock, text) {
 6. **Heavenly Restriction ↔ Summon**: HR users cannot use summons; all owned summons are released
 7. **Dark Continent ↔ Quirks**: Exploring can awaken quirks for HR users; non-HR users learn cross-universe skills
 8. **Skills ↔ Combat**: Cross-universe skills (`.sk-1..10`) cost CE, deal damage, usable in PvE, PvP, and Sukuna raid
+9. **Technique Mastery ↔ Combat**: Mastery XP granted on hit, level ups increase damage
+10. **Weapon Mastery ↔ Combat**: Mastery XP granted on weapon strike, level ups increase damage
+11. **Clan ↔ Economy**: `.clan-donate` feeds clan bank, `.clan-buff` spends bank for buffs
+12. **Domain Mastery ↔ Domain Expansion**: Mastery bonus applied to domain damage in both PvE and PvP
 
 ---
 
@@ -670,10 +834,18 @@ async function broadcastAllGroups(sock, text) {
 - **One-loot rule**: Each user can hold exactly one unique loot (except `black_sparks` which is non-unique)
 - **Grade scaling**: Enemies scale to player's effective grade, keeping difficulty paired with power
 - **Corruption system**: Increases on death, decreases on victory; high corruption enables Cullt ambushes
-- **Prison Realm**: 24h seal; only breakable by PvP defeat with specific weapons or Limitless
+- **Prison Realm**: 24h seal; only breakable by PvP defeat with specific weapons or Limitless; captors can `.unseal`
 - **First Blood**: First registered user to defeat a curse within 10 minutes of bot boot gets `courtroom_domain` loot
 - **Skill cap**: Max 10 cross-universe skills per user
 - **Domain unlock**: Automatic at Grade 2+ (or with Limitless & Six-Eyes)
 - **Backup**: Hourly automatic backups, last 24 kept
 - **Anti-ban**: Message queuing with rate limiting to prevent WhatsApp bans
 - **Broadcast filter**: Only groups with "KEHN" in the name receive global announcements
+- **V2 Migration**: All new fields auto-migrated on boot without data loss
+- **Text Combat UI**: All combat responses use formatted text boxes with HP/CE bars, status effects, and command lists
+- **Sub-regions**: Named after anime characters, visible immediately on `.explore`
+- **HR Stats**: Min 90 attack, 70 defense; domain immunity
+- **CSM System**: `.csm list` shows absorbed curses, `.csm1-9` unleashes specific curse
+- **Technique 5**: `.technique-5 <environment>` for T5R users with environment details
+- **Daily Missions**: 3 rotating missions, claim rewards with `.claim-missions`
+- **Prestige**: Reset at level 100+ for permanent prestige points
